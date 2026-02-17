@@ -316,7 +316,7 @@ For issues or questions:
 4. Check that all dependencies installed successfully
 
 ---
-
+**Built By:**  Philip Ondieki & Rebecca 
 **Built with:** Python, Streamlit, Pandas, GeoPandas, Plotly  
 **Development Time:** 12 hours  
 **Status:** Production-ready MVP
