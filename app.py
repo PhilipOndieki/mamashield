@@ -7,13 +7,16 @@ Research Question:
     even when living in a remote or high-malaria zone of Kenya?
 """
 
+import io
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 # ──────────────────────────────────────────────────────────────────
@@ -29,7 +32,23 @@ st.set_page_config(
 # ──────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ──────────────────────────────────────────────────────────────────
-DATA_DIR = Path("hackathon_data")
+DATA_DIR = Path("hackathon_data")   # local dev fallback
+
+# Google Drive direct-download URLs
+GDRIVE_URLS = {
+    "kenya_dhs_dataset_complete.csv": (
+        "https://drive.google.com/uc?export=download"
+        "&id=1p8P7p3ONBevyoccZVj5GylVp_s3DYI95"
+    ),
+    "kenya_dhs_covariates.csv": (
+        "https://drive.google.com/uc?export=download"
+        "&id=1npGQPMoR1yXMWQ_sukVvapuHF64CI0H6"
+    ),
+    "kenya_dhs_dataset_gps.geojson": (
+        "https://drive.google.com/uc?export=download"
+        "&id=1ce8PF2n0q5vr2PVKnlJK4RevEf1cAwB7"
+    ),
+}
 
 # Only 6 of 1,319 columns needed — keeps full dataset at ~11 MB RAM
 SURVEY_COLS = ["V001", "V106", "V119", "V120", "V121", "B5"]
@@ -72,6 +91,43 @@ st.markdown("""
 
 
 # ──────────────────────────────────────────────────────────────────
+# GOOGLE DRIVE FETCHER
+# ──────────────────────────────────────────────────────────────────
+
+def _fetch_gdrive(url: str) -> io.BytesIO:
+    """
+    Download a file from Google Drive, handling the large-file
+    virus-scan confirmation page if it appears.
+    """
+    session = requests.Session()
+    resp = session.get(url, timeout=180)
+    resp.raise_for_status()
+
+    # Google Drive shows an HTML confirmation page for large files
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/html" in content_type:
+        token_match = re.search(r'confirm=([0-9A-Za-z_\-]+)', resp.text)
+        if token_match:
+            confirmed_url = url + "&confirm=" + token_match.group(1)
+            resp = session.get(confirmed_url, timeout=180)
+            resp.raise_for_status()
+
+    return io.BytesIO(resp.content)
+
+
+def _open_file(filename: str):
+    """
+    Return a file-like object for `filename`.
+    Checks local hackathon_data/ first (dev mode), then falls back
+    to downloading from Google Drive (Streamlit Cloud).
+    """
+    local_path = DATA_DIR / filename
+    if local_path.exists():
+        return local_path          # local: return Path so pandas can memory-map
+    return _fetch_gdrive(GDRIVE_URLS[filename])
+
+
+# ──────────────────────────────────────────────────────────────────
 # DATA LOADING  (cached — runs once per session)
 # ──────────────────────────────────────────────────────────────────
 
@@ -82,27 +138,32 @@ def load_raw() -> tuple:
 
     Returns
     -------
-    df      : pd.DataFrame   — 77,381 rows, analysis-ready
-    geojson : dict           — raw GeoJSON for choropleth map
-    thresholds : dict        — data-driven cut-points for risk & education
+    df         : pd.DataFrame  — 77,381 rows, analysis-ready
+    geojson    : dict          — raw GeoJSON for choropleth map
+    thresholds : dict          — data-driven cut-points for risk & education
     """
 
     # 1 ── Survey (only required columns)
     survey = pd.read_csv(
-        DATA_DIR / "kenya_dhs_dataset_complete.csv",
+        _open_file("kenya_dhs_dataset_complete.csv"),
         usecols=SURVEY_COLS,
         low_memory=False,
     )
 
     # 2 ── Covariates
-    cov = pd.read_csv(DATA_DIR / "kenya_dhs_covariates.csv")[
+    cov_raw = _open_file("kenya_dhs_covariates.csv")
+    cov = pd.read_csv(cov_raw)[
         ["DHSCLUST", "Travel_Times", "Malaria_Prevalence_2020",
          "Nightlights_Composite"]
     ]
 
     # 3 ── GeoJSON + GPS table
-    with open(DATA_DIR / "kenya_dhs_dataset_gps.geojson") as fh:
-        geojson = json.load(fh)
+    geo_raw = _open_file("kenya_dhs_dataset_gps.geojson")
+    if isinstance(geo_raw, Path):
+        with open(geo_raw) as fh:
+            geojson = json.load(fh)
+    else:
+        geojson = json.loads(geo_raw.read().decode("utf-8"))
 
     gps = pd.DataFrame([
         {
@@ -368,10 +429,6 @@ def chart_county_map(cs: pd.DataFrame, geojson: dict = None) -> go.Figure:
         min_sz, max_sz = 15, 50
         sizes  = (valid["sample_size"] / max_n * (max_sz - min_sz) + min_sz).round()
 
-        # Colour: map shield_effect to RdYlGn
-        import plotly.colors as pc
-        colorscale = pc.get_colorscale("RdYlGn")
-
         hover_text = (
             "<b>" + valid["ADM1NAME"] + "</b><br>"
             + "Shield Effect: "   + valid["shield_effect"].round(1).astype(str) + "%<br>"
@@ -592,15 +649,23 @@ def main():
 
     # ── Load ────────────────────────────────────────────────────
     with st.spinner(
-        "⏳ Loading full dataset (77,381 births) — first run ~30 s…"
+        "⏳ Loading full dataset (77,381 births) — first run ~30–60 s…"
     ):
         try:
             df_full, geojson, thresholds = load_raw()
+        except requests.exceptions.RequestException as exc:
+            st.error(f"Network error downloading data: {exc}")
+            st.info(
+                "Check that the Google Drive files are publicly shared "
+                "(Anyone with the link → Viewer)."
+            )
+            st.stop()
         except FileNotFoundError as exc:
             st.error(f"Data file not found: {exc}")
             st.info(
                 "Ensure all four files are inside **hackathon_data/** "
-                "in the same folder as app.py."
+                "in the same folder as app.py, or verify the Google Drive "
+                "sharing permissions."
             )
             st.stop()
         except Exception as exc:
