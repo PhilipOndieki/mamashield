@@ -318,5 +318,3 @@ For issues or questions:
 ---
 **Built By:**  Philip Ondieki & Rebecca 
 **Built with:** Python, Streamlit, Pandas, GeoPandas, Plotly  
-**Development Time:** 12 hours  
-**Status:** Production-ready MVP
