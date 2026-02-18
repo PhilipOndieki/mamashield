@@ -10,11 +10,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Data (Do NOT push raw datasets)
-hackathon_data/
-*.csv
-*.geojson
-*.pdf
+
 
 # Streamlit secrets
 .secrets/
